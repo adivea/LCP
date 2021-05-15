@@ -1,0 +1,86 @@
+---
+title: "inscriptions"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load inscriptions from EDCS&EDH
+
+At SDAM project, we have prepared inscriptions dataset in json format on the basis of EDCS & EDH. 
+
+You can load the json data with Sciencedata.dk login credentials. 
+```{r libraries, include=FALSE}
+#devtools::install_github("sdam-au/sdam")
+
+library(tidyverse)
+library(sdam)
+library(jsonlite)
+library(getPass)
+```
+
+1. Input your sciencedata.dk username - type directly into the RStudio console
+
+```{r, login1, echo = FALSE }
+user <- readline("your sciencedata username: ")
+```
+
+2. Make the request (you will be asked for password in a new pop-up window)
+
+```{r, login2-request, echo = FALSE }
+resp = request("EDHCS_v1-0.json", path="/sharingin/648597@au.dk/SDAM_root/SDAM_data/social_diversity", method="GET", cred=c(user, getPass("your sciencedata password: ")))
+```
+Now you can move to the next step and make a tibble from the request's resp.
+
+3. Make a tibble from the request and display the first six records
+
+```{r inscriptions-json-wrangle}
+list_json <- jsonlite::fromJSON(resp)
+inscriptions = as_tibble(list_json)
+
+interim_json <- jsonlite::toJSON(inscriptions, auto_unbox = TRUE)
+list_json <- jsonlite::fromJSON(interim_json)
+inscriptions = as_tibble(list_json)
+head(inscriptions)
+```
+
+
+4. Make inscriptions into an `sf` object
+IS PROVING DIFFICULT AS THE LATITUDE LONGITUDE COLUMNS ARE NOT NORMALIZED. REQUEST SENT TO VOJTECH!continue here.
+
+```{r inscriptions-sf}
+library(sf)
+library(raster)
+library(tidyverse)
+
+tail(names(inscriptions))
+inscriptions %>% 
+  unlist(inscriptions$Latitude)
+head(inscriptions$Latitude)
+hist(inscriptions$pop_est)
+
+library(mapview)
+library(sf)
+
+i <-  inscriptions %>% 
+  select(id, Longitude, Latitude, not_before, type_of_inscription_clean) %>%  
+  st_as_sf(coords = c(Longitude, Latitude), crs = 4326)
+names(i)
+n
+```
+
+# Read EDCHS merged dataset geojson directly with sf library
+This 
+```{r}
+library(sf)
+sample <- st_read("https://sciencedata.dk/public/a9237c5ea642d4714bcdefb03f70a1f4/EDHCSg.geojson")
+```
+
+```{r}
+names(sample)
+library(mapview)
+mapview(sample)
+```
+

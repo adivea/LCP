@@ -1,0 +1,469 @@
+---
+title: "Least Cost Path - from Rome to the Empire"
+author: "Adela Sobotkova"
+date: "12-April-2021 updated `r Sys.Date()`"
+output:
+  rmdformats::readthedown:
+    highlight: kate
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+library(rmdformats)
+
+## Global options
+options(max.print="75")
+opts_chunk$set(echo=TRUE,
+	             cache=TRUE,
+               prompt=FALSE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE)
+opts_knit$set(width=75)
+```
+# Before we start
+
+This script has two parts: 
+- it first presents a proof of concept of least cost path calculation for cities in Italy and afterwards
+- it applies the approach to conductance matrix generation for most of the Roman Empire.
+
+## Data and packages
+You will need the packages `gdistance`, `sf`, `raster`, `sdam` and `jsonlite` (the last two only if needing provinces and cities data from www.sciencedata.dk).
+The analysis relies on 
+
+* elevation rasters from the SRTM service, accessible via the `getData()` function in `raster` package
+* shapefiles of cities and provinces of the Roman Empire collated from Hanson and XXXX sources and provided via the SDAM operational storage on www.sciencedata.dk These datasets are in `.json` format and are best loaded via either the `sdam` or  `sf` packages. The latter is recommended for the province polygons, while former will work fine with the cities. Sign-in is not required to get the data, as they are in public folder and can be used anonymously.
+
+## Caveat - computational resources
+This code was developed on dedicated Aarhus University eResearch infrastructure (UCloud) using a machine with 192Gb RAM. While it will work on more moderate resources,  transition layer calculations in the second part of the script are compute-intensive and may need to be downscoped or further atomized to run faster. The intermediate rasters covering the extent of the Empire are currently ca 2.1Gb a piece. 
+
+If you are not sure you wish to run the entire script, start with the first Proof of Concept and use only one srtm file for Italy (between 8- 12 lng and 40-42 lat). 
+
+# Proof of Concept - Cost of travel in Italy
+Lines 44 through 133 take you through proof of concept application of Least-Cost past calculation between source and destination across a terrain, using the Tobler Hiking function. 
+You will download srtm files for Italy (between 8- 12 lng and 40-42 lat) and then use the functionality in package `gdistance` to calculate anisotropic transition matrix(ces) which can be used as inputs for cost-of-travel (cumulative cost) rasters for different destinations (provided as coordinates). 
+
+## Get elevation data for Italy
+```{r download-srtm}
+library(raster)
+
+#Download two more tiles
+srtm1 <- getData('SRTM', lon=10, lat=42, path = ".") #39.04.zip
+#plot(srtm1)
+hist(srtm1)
+```
+
+Attach the files together in order to have a continuous raster covering the whole of the Apennine peninsula. You can use the `mosaic()` function.
+
+## Eliminate subzero values from raster
+```{r Italy-reclassify}
+# Eliminate values below 0
+hist(srtm1)
+rcl <- cbind(-100,0, NA)
+srtm <- reclassify(srtm1, rcl = rcl)
+hist(srtm)
+```
+ 
+## Calculate travel cost using the Hiking Function
+We will calculate the most efficient foot travel paths across terrain using the [Waldo Tobler's Hiking function](https://escholarship.org/content/qt05r820mz/qt05r820mz.pdf). The formula for this function is:
+
+`walkrate = a*exp(-b*abs(S+c))`
+
+* walking velocity is in km/h (multiply by 1000 to get meters/hour)
+* S = height difference/distance (in same units)
+* c is 0.05 constant that gets us to 5 km/h on the flat terrain
+* for off-path travel, multiply by 0.6, for horseback travel, multiply by 1.25.
+* travel time is computed as distance/velocity
+
+Calculations are best done in a geographic matrix, with elevations at equally spaced increments in two directions (or need correction).
+
+Then one can compute, from any initial point, the minimum time path to all other places.
+Connecting places at equal time-distances yields isochronic lines, or "geographic circles". 
+
+In R, the calculation has been implemented in the `gdistance` package using the Dijkstra algorithm, see [vignette](http://www2.uaem.mx/r-mirror/web/packages/gdistance/vignettes/gdistance-vignette.pdf)
+
+### First, get the Slope
+slope = difference in height / distance traveled
+
+```{r slope-correct}
+library(gdistance)
+
+r <- srtm
+
+heightDiff <- function(x){x[2] - x[1]}
+hd <- transition(r,heightDiff,8,symm=FALSE)
+hd
+slope <- geoCorrection(hd, scl=FALSE)
+slope
+#plot(raster(slope)) # you can look if you care
+```
+
+### Next, calculate Speed on adjacent cells
+Subsequently, we calculate the speed. We need to exercise special care, because the matrix values between non-adjacent cells are 0, but the slope between these cells is not 0! Therefore, we need to restrict the calculation to adjacent cells. We do this by creating an index for adjacent cells (adj) with the function `adjacent()`. Using this index, we extract and replace adjacent cells, without touching the other values
+
+```{r adjacent-speed}
+adj <- adjacent(r, cells=1:ncell(r), pairs=TRUE, directions=8)
+speed <- slope
+speed[adj] <- 6 * 1000*  exp(-3.5 * abs(slope[adj] + 0.05)) # 1000 converts the km/h to meters per hour given that all rasters are in m units
+plot(raster(speed), main = "Friction of surface in meters per hour, uncalibrated") # km per hour
+```
+
+Now we have calculated the speed of movement between adjacent cells. We are close to having the final conductance values. Attainable speed is a measure of the ease of crossing from one cell to another on the grid. 
+However, we also need to take into account the distance between cell centres. Travelling with the same speed, a diagonal connection between cells takes longer to cross
+than a straight connection. Therefore, we use the function `geoCorrection()` again!
+
+### Finally, generate the conductance layer 
+```{r geocorrection}
+conductance <- geoCorrection(speed, scl = FALSE)
+plot(raster(conductance), main = "Conductivity of surface in 1/traveltime calibrated") # the difference is hard to see, but ok, I'll take the word for it
+```
+ This conductance layer is the prerequisite for any futher LCP and other travel time calculations between one or more points, or for random walks. In that respect, it is not the final product of the analysis, but the main input into any terrestrial ease of travel analysis.
+
+## All paths lead to Rome (or cities in Italy :)
+- and how long does it take?
+
+
+Lets create a raster of isochrones of temporal distance from Rome
+Coordinates of Rome in decimal degrees
+Latitude: 41.8919300°
+Longitude: 12.5113300°
+or 
+Easting: 293538.75664729
+Northing: 4640772.4548957
+
+```{r cost-Rome}
+#Rome <- c(12.5113300, 41.8919300)
+#Rome_prj <- c(293538.75664729,4640772.4548957)
+
+y <- accCost(conductance, fromCoords = Rome_prj)
+plot(y, main = "cost of travel in hours"); contour(y, add =TRUE) # is this in seconds??
+10000/3600
+```
+
+```{r cost-IT-cities}
+# Cost surface for Cities in Italy
+# ensure you have cities loaded (if not, skip to line 157
+```
+
+# Application - Cost of travel among Mediterranean cities 
+```{r download-srtm2}
+## Load all SRTM tiles and calculating conductance and travel to towns greater than 'pop' population
+## Both conductance and travel are specified below
+# x = c(-2, 0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 40)
+# y = c(36, 40, 42, 44)
+pop = 5000
+x = c(-8,-6,-4)
+y = c(30, 32, 34,36, 40, 42, 44, 46, 48, 50) # second run to encompass Britannia, Dacia, Black Sea and Egypt
+x = c(36, 38, 40, 42)
+y = c(36, 38, 40, 42)
+
+for(i in x){
+  for(e in y){
+    #Download a tile
+    srtm <- getData('SRTM', lon = i, lat=e) 
+    ## Aggregate just to test the behavior
+    srtm <- aggregate(srtm, fact = 10)
+    ## Reclassify subzero values
+    rcl <- cbind(-9999, 1, NA)
+    r <- reclassify(srtm, rcl = rcl)
+    ## Save the raster for future record ?
+    # saveRDS(r, paste0("output_data/",names(r),".rds"))
+    ## Calculate conductance
+    calc.conductance(r)
+    print("conductance finished, onto travel to town")
+  }
+}
+    ## Calculate cost of travel between cities sized 5000 and higher
+#     traveltotown(cities, pop)
+#   }
+#   
+# }
+
+
+names(srtm)
+```
+
+## Load cities with population sizes
+
+At SDAM project, we have prepared cities dataset in json format on the basis of Hansons' publication 2017. 
+
+You can load the json data with Sciencedata.dk login credentials. 
+```{r libraries, include=FALSE}
+devtools::install_github("sdam-au/sdam")
+
+library(tidyverse)
+library(sdam)
+library(jsonlite)
+library(getPass)
+```
+
+1. Input your sciencedata.dk username - type directly into the RStudio console
+
+```{r, login1, echo = FALSE }
+user <- readline("your sciencedata username: ")
+```
+
+2. Make the request (you will be asked for password in a new pop-up window)
+
+```{r, login2-request, echo = FALSE }
+resp = request("roman_cities.json", path="/sharingin/648597@au.dk/SDAM_root/SDAM_data/urban", method="GET", cred=c(user, getPass("your sciencedata password: ")))
+```
+Now you can move to the next step and make a tibble from the request's resp.
+
+3. Make a tibble from the request and display the first six records
+
+```{r cities-json-wrangle}
+list_json <- jsonlite::fromJSON(resp)
+cities_tibble = as_tibble(list_json)
+
+interim_json <- jsonlite::toJSON(cities_tibble, auto_unbox = TRUE)
+list_json <- jsonlite::fromJSON(interim_json)
+cities = as_tibble(list_json)
+head(cities)
+```
+
+
+4. Make cities into an `sf` object
+
+```{r cities-sf}
+library(sf)
+library(raster)
+library(tidyverse)
+
+names(cities_tibble)
+head(cities_tibble$`Longitude (X)`)
+hist(cities_tibble$pop_est)
+
+library(mapview)
+library(sf)
+
+c <- cities %>% 
+  filter(pop_est >5000) %>% 
+  st_as_sf(coords = c("Longitude (X)", "Latitude (Y)"), 
+           crs = 4326)
+
+# Biggish cities
+cities %>% 
+  filter(pop_est >5000) %>% 
+  st_as_sf(coords = c("Longitude (X)", "Latitude (Y)"), 
+           crs = 4326) %>% 
+  mapview()
+
+# Smallish cities
+cities %>% 
+  filter(pop_est <5000) %>% 
+  st_as_sf(coords = c("Longitude (X)", "Latitude (Y)"), 
+           crs = 4326) %>% 
+  mapview()
+
+```
+
+
+## Approach 1: Mosaic the conductance and cost files - OBSOLETE
+Let's look at the results at the scale of the Mediterranean. We have individual conductance and cost between city files, so let's stitch them up into a conductance and cost raster mosaic
+```{r cost-mosaic, e}
+# PLOT THE Existing cost files
+plot(c$geometry)
+plot(readRDS("output_data/srtm_37_04costtotown5000.rds"), add = TRUE)
+plot(readRDS("output_data/srtm_36_04costtotown5000.rds"), add = TRUE)
+plot(readRDS("output_data/srtm_36_05costtotown5000.rds"), add = TRUE)
+plot(readRDS("output_data/srtm_37_05costtotown5000.rds"), add = TRUE)
+
+# with a Loop - Does not fill in, but creates new files!
+for (name in costfiles){
+  costfiles <- list.files("output_data/", pattern = "*5000.rds")
+  plot(c$geometry); plot(readRDS(paste0("output_data/",name)), add = TRUE)
+}
+
+# Mosaic the cost rasters
+plot(cost)
+cost_lg <- cost
+for (name in costfiles){
+  costfiles <- list.files("output_data/", pattern = "*5000.rds")
+  newfile <- readRDS(paste0("output_data/",name))
+  cost_lg <- mosaic(cost_lg, newfile, fun = mean)                      
+}
+
+plot(cost_lg)
+```
+## Approach 2: Model cost on the entire mosaiced elevation file for the Mediterranean
+Mosaic the original files
+```{r mosaic-srtm}
+# Mosaic the srtm rasters
+
+plot(srtm)
+srtm_lg <- srtm
+srtmfiles <- list.files(".", pattern = "*.tif")
+for (name in srtmfiles){
+  srtmfiles <- list.files(".", pattern = "*.tif")
+  newfile <- raster(name)
+  ## Aggregate just to test the behavior
+  srtm_f10 <- aggregate(newfile, fact = 10)
+    ## Reclassify subzero values
+  rcl <- cbind(-9999, 1, NA)
+  srtm_new <- reclassify(srtm_f10, rcl = rcl)
+  srtm_lg <- mosaic(srtm_lg, srtm_new, fun = mean)                      
+}
+
+plot(srtm_lg)
+hist(srtm_lg)
+```
+Calculate conductance manually 
+The `calc.conductance` function for batch processing seems to error out after the first 10 rows due to the traveltotown embedded function, so let's try manual approach
+```{r conductance-calc}
+# Batch function which does not work due to size?
+# calc.conductance(srtm_lg)
+# plot(raster(readRDS("output_data/srtm_43_04conductance.rds")))
+
+
+library(gdistance)
+#r <- aggregate(srtm_lg, fact = 10)
+r <- srtm_lg
+heightDiff <- function(x){x[2] - x[1]}
+hd <- transition(r,heightDiff,8,symm=FALSE)
+hd
+slope <- geoCorrection(hd, scl=FALSE)
+slope
+adj <- adjacent(r, cells=1:ncell(r), pairs=TRUE, directions=8)
+speed <- slope
+speed[adj] <- 6 * 1000*  exp(-3.5 * abs(slope[adj] + 0.05)) # converting to meters given that all rasters are in m units
+conductance <- geoCorrection(speed, scl = FALSE)
+plot(raster(conductance), main = "Conductivity of surface in 1/traveltime calibrated") # the difference is hard to see, but ok, I'll take the word for it
+saveRDS(conductance, "output_data/All_conductance.rds")
+
+```
+# Calculate travel cost to nearest 5000 pax city
+```{r cost-5000}
+# Load the 5000k cities 
+cities <- readRDS("cities.rds")
+cities5k <- cities%>%
+ dplyr::select('Ancient Toponym', Province, Country, pop_est, "Longitude (X)", "Latitude (Y)" ) %>% 
+  dplyr::filter(pop_est > 5000)%>% 
+  st_as_sf(coords = c("Longitude (X)","Latitude (Y)"), crs = 4326)
+  
+cost5k <- accCost(conductance, fromCoords = as(cities5k, "Spatial"))
+plot(cost5k, main = "cost of travel to 5000pax city in hours"); contour(cost5k, add =TRUE) #
+
+saveRDS(cost5k, "output_data/All_costto5000.rds")
+```
+
+# Calculate travel cost to nearest 1000 pax city
+```{r cost-1000}
+cities1k <- cities%>%
+ dplyr::select('Ancient Toponym', Province, Country, pop_est, "Longitude (X)", "Latitude (Y)" ) %>% 
+  dplyr::filter(pop_est > 1000)%>% 
+  st_as_sf(coords = c("Longitude (X)","Latitude (Y)"), crs = 4326)
+  
+cost1k <- accCost(conductance, fromCoords = as(cities1k, "Spatial"))
+plot(cost1k, main = "cost of travel to 1000 pax and larger city in hours"); contour(cost1k, add =TRUE) #
+
+saveRDS(cost1k, "output_data/All_costto1000.rds")
+```
+Now we have two rasters where we can calculate the proportions of terrain within the Roman provinces that was farther than 8 hours walk (1 day) and see if everyone could have lived there.
+The weakness of these rasters is: the cities are collated from different periods (not just Roman) and the sea is included. Also, perhaps I should have put in a coefficient for offpath walk??
+
+
+# Limit the study only to terrestrial zones within the Roman provinces
+The generated rasters are confusing because seas are included as if they could be crossed on foot. Let's cut them out. First we load the boundaries of Roman provinces at their greatest extent.  
+```{r download-provinces}
+# Read geojson directly from public folder
+provinces <- st_read("https://sciencedata.dk/public/cd2e3b7206a89bf833cf3648703452e9/roman_provinces.json")
+plot(provinces$geometry)
+```
+
+## Crop and mask out the seas
+Overlay provinces over the cost grid and only select the parts of grid within them, clipping to dry land only.
+```{r mask-plot-5k}
+cost <- cost5k
+c <- crop(cost, as(provinces$geometry, "Spatial"))
+cc <- mask(c, as(provinces$geometry, "Spatial"))
+
+pdf("outputs/All_costto5000.pdf")
+plot(log10(cc), main = "cost of foot travel in log10hours to the nearest 5000pax town"); contour(cc, col = "red", add =TRUE)
+plot(cc, main = "cost of foot travel in hours to the nearest 5000pax town"); #contour(cc, col = "red", add =TRUE)
+dev.off()
+```
+
+```{r mask-plot-1k}
+cost <- cost1k
+c <- crop(cost, as(provinces$geometry, "Spatial"))
+cc <- mask(c, as(provinces$geometry, "Spatial"))
+
+pdf("outputs/All_costto1000.pdf")
+plot(log10(cc), main = "cost of foot travel in log10hours to the nearest 1000pax town"); 
+#contour(cc, col = "red", add =TRUE); 
+#plot(provinces$geometry, add = TRUE); plot(cities1k$geometry, add = TRUE)
+plot(cc, main = "cost of foot travel in hours to the nearest 1000pax town"); #contour(cc, col = "red", add =TRUE)
+dev.off()
+
+```
+
+# Calculate least cost path distances between inscriptions and the nearest settlement over 1000pax 
+
+## Load the inscriptions
+```{r load-inscriptions}
+library(sf)
+library(jsonlite)
+library(tidyverse)
+
+# Only Italy
+inscrIT_json <- jsonlite::fromJSON("https://sciencedata.dk/public/b6b6afdb969d378b70929e86e58ad975/EDH_subset_2021-02-15.json")
+
+# All Western Mediterranean (Claus_Slaby deduplicated) dataset 
+inscrALL_json <- jsonlite::fromJSON("https://sciencedata.dk/social_diversity/e0f9cd400dd05584fe06fe1d804deff0/EDHCS_v1-0.json")
+
+# convert json to tibble
+insc <- tibble(list_inscr_json)
+insc
+```
+
+
+Clean them up a bit and convert to sf object
+```{r sf-inscr}
+insc_4326 <- insc %>% 
+  #select(coordinates) %>% 
+  #slice(1:100) %>% 
+  separate(col = coordinates, into = c("longitude","latitude"), sep = ",") %>%
+  mutate(latitude = as.numeric(gsub("\\)|\\(|c","", latitude)),
+         longitude = as.numeric(gsub("\\)|\\(|c","",longitude))) %>% 
+  filter(!is.na(longitude)) %>% 
+  st_as_sf(coords = c("longitude","latitude"), crs = 4326)
+
+library(mapview)
+
+mapview(insc_4326, zcol = "type_of_inscription_clean") + mapview(cities1k, cex = "pop_est", zcol = "pop_est")
+```
+
+## Calculate distance to nearest city
+Distance to nearest feature is a 2 step process of first selecting the nearest town and then calculating the distance between the inscription using the conductance matrix and the nearest city.
+
+If we were using Euclidian distance, I would use st_distance in a projected space
+```{r dist-euclid}
+cities1k  # should be over 1000 inhabitants and 4326 SRS
+nearestcity  <- st_nearest_feature(insc_4326, cities1k$geometry)
+
+insc_4326$Euc_dist_1ktown <- st_distance(st_transform(insc_4326,crs=3035), st_transform( cities1k[nearestcity,], crs = 3035), by_element = TRUE)
+
+summary(insc_4326$Euc_dist_1ktown) # summary of distance in m between inscriptions and nearest town as the crow flies.
+
+# make a map of links between inscriptions and nearest towns 
+```
+.. but we are using terrain / friction surface, and so we need to use costDistance() function, supply it with cost raster (conductance transition layer) and the coordinates of source, the inscription, and the destination, the nearest town of over 1000 inhabitants. 
+```{r nearest-town}
+# Nearest feature
+
+nearestcitycoords  <- cities1k[st_nearest_feature(insc_4326, cities1k$geometry),]$geometry
+
+# Cost of covering the distance
+insc_4326$Lcp_dist_1ktown <- costDistance(conductance,
+             fromCoords= as(insc_4326, "Spatial"), 
+             toCoords=as(nearestcitycoords, "Spatial"))
+
+# alternative
+ca <- accCost(x,fromCoords=A) # inscriptions
+plot(ca, main = "cost of travel from  hours")
+extract(ca,B) # B is a list of nearest cities
+
+summary(dist_mat)
+```
